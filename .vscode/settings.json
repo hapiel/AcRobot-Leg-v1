@@ -1,0 +1,23 @@
+{
+  "files.associations": {
+    "*.ejs": "html",
+    "*.tcc": "cpp",
+    "deque": "cpp",
+    "unordered_map": "cpp",
+    "unordered_set": "cpp",
+    "vector": "cpp",
+    "algorithm": "cpp",
+    "array": "cpp",
+    "functional": "cpp",
+    "iterator": "cpp",
+    "memory_resource": "cpp",
+    "optional": "cpp",
+    "tuple": "cpp",
+    "fstream": "cpp",
+    "iosfwd": "cpp",
+    "istream": "cpp",
+    "streambuf": "cpp",
+    "cmath": "cpp",
+    "utility": "cpp"
+  }
+}
