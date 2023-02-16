@@ -5,6 +5,7 @@
 #include "Wire.h"
 #include <PID_v1.h> //https://github.com/br3ttb/
 #include <RunningMedian.h>
+#include <SparkFun_I2C_Mux_Arduino_Library.h>
 
 #define R_F_PWM_PIN  16  
 #define R_B_PWM_PIN  17   
@@ -14,9 +15,9 @@
 
 #define BUZZER_PIN 26
 #define IR_PIN 27
-#define LED_R_PIN 12
-#define LED_G_PIN 13
-#define LED_B_PIN 14
+#define LED_R_PIN 14
+#define LED_G_PIN 12
+#define LED_B_PIN 13
 
 #define BOOT_SW_PIN 23
 
@@ -96,9 +97,8 @@ String success; // TODO: remove this
 
 // ENCODERS
 
-
 AS5600 rAs5600; // encoder
-AS5600 lAs5600;
+AS5600 lAs5600; // encoder
 
 uint16_t positionRLegRaw;
 uint16_t positionLLegRaw;
@@ -109,6 +109,13 @@ const uint16_t NEUTRAL_L_LEG = 0; // 4096 - position at very top, raw
 
 void updatePositions();
 
+// I2C MULTIPLEXER
+
+QWIICMUX myMux;
+
+void muxInit();
+uint16_t getRAngleThroughMux();
+uint16_t getLAngleThroughMux();
 
 // LCD
 // LED
@@ -203,8 +210,7 @@ void setup() {
 
   pwmInit();
   pidInit();
-
-  rAs5600.begin();
+  muxInit();
 
 }
 
@@ -213,9 +219,10 @@ void setup() {
 
 
 void loop() {
-
+  // myMux.setPort(0);
   checkReceiveTimeout();
   updateLED();
+  // updatePositions();
 
   // TEST DATA
   strcpy(dataOut.hi, "hello"); // easiest way to replace string
@@ -226,7 +233,7 @@ void loop() {
 
   joystickControlsLegs();
   
-
+  // printAll();
 
 }
 
@@ -321,11 +328,36 @@ void sendData(){
 
 
 void updatePositions(){
-  positionRLegRaw = rAs5600.readAngle();
-  // positionLLegRaw = lAs5600.readAngle();
+  positionLLegRaw = getLAngleThroughMux();
+  // positionRLegRaw = getRAngleThroughMux();
 
-  positionRLegDegrees = fmod(((positionRLegRaw + NEUTRAL_R_LEG) / 4096.) * 360, 360);
   positionLLegDegrees = fmod(((positionLLegRaw + NEUTRAL_L_LEG) / 4096.) * 360, 360);
+  positionRLegDegrees = fmod(((positionRLegRaw + NEUTRAL_R_LEG) / 4096.) * 360, 360);
+}
+
+// -------------------------------
+// MARK: - I2C multiplexer
+
+void muxInit(){
+  Wire.begin();
+  if (myMux.begin() == false) {
+    Serial.println("Mux not detected.");
+  }
+
+  myMux.setPort(0);
+  lAs5600.begin();
+  // myMux.setPort(1);
+  // rAs5600.begin();
+}
+
+uint16_t getLAngleThroughMux(){
+  // myMux.setPort(0);
+  return lAs5600.readAngle();
+}
+
+uint16_t getRAngleThroughMux(){
+  myMux.setPort(1);
+  return rAs5600.readAngle();
 }
 
 // -------------------------------
@@ -394,10 +426,13 @@ void pidInit(){
 
 void printAll(){
   if (printTimer < millis()){
-    printTimer = millis() + 200;
-    Serial.print(fmod(positionRLegDegrees, 360));
+    printTimer = millis() + 100;
+    Serial.print("R: ");
+    Serial.print(positionRLegDegrees);
     Serial.print("\t");
-    Serial.println(rAs5600.readStatus(),BIN);
+    Serial.print("L: ");
+    Serial.println(positionLLegDegrees);
+    Serial.println(positionRLegRaw);
   }
 }
 
