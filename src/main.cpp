@@ -1,3 +1,13 @@
+/*
+Title: Acrobot Legs v1
+Author: Daniel Simu
+Date: February 2023
+Description: This is the Acrobot firmware
+
+Status light: Blue = connected wireless, Red = disconnected wireless
+
+*/
+
 #include <Arduino.h>
 #include <WiFi.h>
 #include <esp_now.h>
@@ -6,6 +16,7 @@
 #include <PID_v1.h> //https://github.com/br3ttb/
 #include <RunningMedian.h>
 #include <SparkFun_I2C_Mux_Arduino_Library.h>
+#include <LiquidCrystal_I2C.h>
 
 #define R_F_PWM_PIN  16  
 #define R_B_PWM_PIN  17   
@@ -21,6 +32,7 @@
 
 #define BOOT_SW_PIN 23
 
+#define ENCODER_L_PWM 15
 
 // ---------------
 // MARK: - FORWARD DECLARATIONS in order of document 
@@ -100,12 +112,16 @@ String success; // TODO: remove this
 AS5600 rAs5600; // encoder
 AS5600 lAs5600; // encoder
 
+void captureLPWM();
+
+volatile uint32_t lPWMduration = 0;
+
 uint16_t positionRLegRaw;
 uint16_t positionLLegRaw;
 double positionRLegDegrees;
 double positionLLegDegrees;
-const uint16_t NEUTRAL_R_LEG = 0; // 4096 - position at very top, raw
-const uint16_t NEUTRAL_L_LEG = 0; // 4096 - position at very top, raw
+const uint16_t NEUTRAL_R_LEG = 3107; // 4096 - position at very top, raw
+const uint16_t NEUTRAL_L_LEG = 4004; // 4096 - position at very top, raw
 
 void updatePositions();
 
@@ -118,6 +134,14 @@ uint16_t getRAngleThroughMux();
 uint16_t getLAngleThroughMux();
 
 // LCD
+
+LiquidCrystal_I2C lcd(0x27, 20, 4);
+uint32_t lcdTimer = 0;
+
+void lcdInit();
+void setLCD();
+void updateLCD();
+
 // LED
 
 void ledRed(uint8_t);
@@ -211,6 +235,7 @@ void setup() {
   pwmInit();
   pidInit();
   muxInit();
+  lcdInit();
 
 }
 
@@ -219,10 +244,9 @@ void setup() {
 
 
 void loop() {
-  // myMux.setPort(0);
   checkReceiveTimeout();
   updateLED();
-  // updatePositions();
+  updatePositions();
 
   // TEST DATA
   strcpy(dataOut.hi, "hello"); // easiest way to replace string
@@ -233,7 +257,7 @@ void loop() {
 
   joystickControlsLegs();
   
-  // printAll();
+  printAll();
 
 }
 
@@ -329,10 +353,22 @@ void sendData(){
 
 void updatePositions(){
   positionLLegRaw = getLAngleThroughMux();
-  // positionRLegRaw = getRAngleThroughMux();
+  positionRLegRaw = getRAngleThroughMux();
 
-  positionLLegDegrees = fmod(((positionLLegRaw + NEUTRAL_L_LEG) / 4096.) * 360, 360);
+  positionLLegDegrees = 360 - fmod(((positionLLegRaw + NEUTRAL_L_LEG) / 4096.) * 360, 360);
   positionRLegDegrees = fmod(((positionRLegRaw + NEUTRAL_R_LEG) / 4096.) * 360, 360);
+}
+
+void captureLPWM()
+{
+  static uint32_t lastTime  = 0;
+  uint32_t now = micros();
+  if (digitalRead(ENCODER_L_PWM) == HIGH)
+  {
+    lPWMduration = now - lastTime;
+  }
+
+  Serial.print("*");
 }
 
 // -------------------------------
@@ -345,23 +381,66 @@ void muxInit(){
   }
 
   myMux.setPort(0);
+  rAs5600.begin();
+  myMux.setPort(1);
   lAs5600.begin();
-  // myMux.setPort(1);
-  // rAs5600.begin();
-}
 
-uint16_t getLAngleThroughMux(){
-  // myMux.setPort(0);
-  return lAs5600.readAngle();
+  if (!lAs5600.isConnected()){
+    Serial.println("Left encoder not connected.");
+  }
+
+  myMux.setPort(0);
+  if (!rAs5600.isConnected()){
+    Serial.println("Right encoder not connected.");
+  }
+
 }
 
 uint16_t getRAngleThroughMux(){
-  myMux.setPort(1);
+  myMux.setPort(0);
   return rAs5600.readAngle();
+}
+
+uint16_t getLAngleThroughMux(){
+  myMux.setPort(1);
+  return lAs5600.readAngle();
 }
 
 // -------------------------------
 // MARK: - Lcd
+
+void lcdInit(){
+  lcd.init();
+  lcd.clear();
+  lcd.backlight();
+
+  setLCD();
+}
+
+void setLCD()
+{
+  lcd.clear();
+
+  lcd.setCursor(0, 0);
+  lcd.print("Robin is awake!");
+
+}
+
+// TODO: Create multiple modes, that can be combined (battery + debug, or battery + menu). Switching mode triggers clear.
+void updateLCD()
+{
+
+  if (lcdTimer > millis())
+  {
+    return;
+  }
+  lcdTimer = millis() + 200; // update every 200 milliseconds
+
+  // lcd.setCursor(18, 0);
+  // char batPerc[3];
+  // sprintf(batPerc, "%02d", batteryPercent);
+  // lcd.print(batPerc);
+}
 
 // -------------------------------
 // MARK: - Led
@@ -426,13 +505,17 @@ void pidInit(){
 
 void printAll(){
   if (printTimer < millis()){
-    printTimer = millis() + 100;
+    printTimer = millis() + 300;
     Serial.print("R: ");
     Serial.print(positionRLegDegrees);
     Serial.print("\t");
+    Serial.print(getRAngleThroughMux());
     Serial.print("L: ");
-    Serial.println(positionLLegDegrees);
-    Serial.println(positionRLegRaw);
+    Serial.print(positionLLegDegrees);
+    Serial.print("\t");
+    Serial.println(getLAngleThroughMux());
+    // Serial.println(positionRLegRaw);
+
   }
 }
 
