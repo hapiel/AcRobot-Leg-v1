@@ -13,14 +13,15 @@ Status light: Blue = connected wireless, Red = disconnected wireless
 #include <esp_now.h>
 #include "AS5600.h"
 #include "Wire.h"
-#include <PID_v1.h> //https://github.com/br3ttb/
+#include <PID_v1.h> // https://github.com/br3ttb/
 #include <RunningMedian.h>
 #include <SparkFun_I2C_Mux_Arduino_Library.h>
 #include <LiquidCrystal_I2C.h>
+#include "PCF8574.h"
 
 #define R_F_PWM_PIN  16  
 #define R_B_PWM_PIN  17   
-#define L_F_PWM_PIN  5  
+#define L_F_PWM_PIN  19  
 #define L_B_PWM_PIN  18 
 #define BATTERY_V_PIN 32
 
@@ -63,14 +64,15 @@ bool connectionStatus = false;
 
 // data out:
 typedef struct struct_data_out {
-  char hi[6];
-  uint16_t pot1;
-  uint16_t pot2;
-} struct_data_out;
 
-// testing with 2 slide pot values
-uint16_t pot1;
-uint16_t pot2;
+  double rP;
+  double rI;
+  double rD;
+
+  double rInput;
+  double lInput;
+
+} struct_data_out;
 
 struct_data_out dataOut;
 
@@ -93,6 +95,18 @@ typedef struct struct_data_in {
   char key;
 
   int8_t batteryPercent;
+
+  double rP;
+  double rI;
+  double rD;
+
+  double lP;
+  double lI;
+  double lD;
+
+  uint16_t rTargetPositionDegrees;
+  uint16_t lTargetPositionDegrees;
+
 } struct_data_in;
 
 struct_data_in dataIn;
@@ -125,6 +139,20 @@ const uint16_t NEUTRAL_L_LEG = 4004; // 4096 - position at very top, raw
 
 void updatePositions();
 
+// EXPANDER
+
+PCF8574 Expander(0x38);
+
+void updateButtons();
+void expanderInit();
+
+bool buttonUpL;
+bool buttonUpR;
+bool buttonDownL;
+bool buttonDownR;
+bool yellowSwitch;
+
+
 // I2C MULTIPLEXER
 
 QWIICMUX myMux;
@@ -142,6 +170,17 @@ void lcdInit();
 void setLCD();
 void updateLCD();
 
+bool lcdInfo = true;
+void lcdSetInfo();
+
+bool lcdPID = true;
+void lcdSetPID();
+void lcdUpdatePID();
+
+bool lcdTargetPosition = true;
+void lcdSetTargetPosition();
+void lcdUpdateTargetPosition();
+
 // LED
 
 void ledRed(uint8_t);
@@ -153,16 +192,28 @@ void updateLED();
 
 // PID
 
-double setpoint, input, output; //used by PID lib
+uint16_t rTargetPositionDegrees = 180;
+uint16_t lTargetPositionDegrees = 180;
+
+const uint8_t RDEADBAND = 44;
+const uint8_t LDEADBAND = 46;
+
+double rSetpoint, rInput, rOutput; //used by PID lib
+double lSetpoint, lInput, lOutput;
 //setpoint= nb Rotation of the motor shaft,
 //input = current rotation,
 //output is pwmSpeed of the motor
 
 //Specify the links and initial tuning parameters
-double Kp = 60., Ki = 1.2, Kd = 0.; 
-PID rPID(&input, &output, &setpoint, Kp, Ki, Kd, DIRECT); 
+double rP = 1., rI = 0, rD = 0.; 
+double lP = 1., lI = 0, lD = 0.; 
+
+PID rPID(&rInput, &rOutput, &rSetpoint, rP, rI, rD, DIRECT); 
+PID lPID(&lInput, &lOutput, &lSetpoint, lP, lI, lD, DIRECT); 
 
 void pidInit();
+void controlMotorPID();
+void updatePID();
 
 // PRINT
 
@@ -192,14 +243,19 @@ const uint8_t L_F_PWM_CHAN = 2;
 const uint8_t L_B_PWM_CHAN = 3;
 const uint16_t PWM_FREQ = 24000; // TODO can be experimented with. https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/peripherals/ledc.html?highlight=pwm#supported-range-of-frequency-and-duty-resolutions
 const uint8_t PWM_RES = 8; // will receive error on serial if set too high.
-// const uint16_t PWM_RANGE = pow(2, PWM_RES) -1;
-const uint16_t PWM_RANGE = 128;
+const uint16_t PWM_RANGE = pow(2, PWM_RES) -1;
+// const uint16_t PWM_RANGE = 128;
 
 void pwmInit();
 
 //REMOTE CONTROL
 
-void joystickControlsLegs();
+// 
+uint16_t slideTestForward;
+uint16_t slideTestBackward;
+
+void joystickOrButtonsControlLegs();
+void sliderPWMtest();
 
 
 // END FORWARD DECLARATIONS
@@ -209,6 +265,11 @@ void joystickControlsLegs();
 
 
 void setup() {
+  pinMode(BOOT_SW_PIN, INPUT_PULLUP);
+  pinMode(L_F_PWM_PIN, OUTPUT);
+  digitalWrite(L_F_PWM_PIN, LOW);
+
+
   Serial.begin(115200);
   WiFi.mode(WIFI_MODE_STA);
   Serial.println(WiFi.macAddress());
@@ -236,6 +297,7 @@ void setup() {
   pidInit();
   muxInit();
   lcdInit();
+  expanderInit();
 
 }
 
@@ -247,16 +309,21 @@ void loop() {
   checkReceiveTimeout();
   updateLED();
   updatePositions();
+  updateButtons();
+  updateLCD();
+  updateBattery();
+  updatePID();
 
-  // TEST DATA
-  strcpy(dataOut.hi, "hello"); // easiest way to replace string
-  dataOut.pot1 = pot1;
-  dataOut.pot2 = 555;
+  dataOut.rInput = rInput;
+  dataOut.lInput = lInput;
+
+  controlMotorPID();
+  // sliderPWMtest();
 
   sendData();
 
-  joystickControlsLegs();
-  
+  // joystickOrButtonsControlLegs();
+
   printAll();
 
 }
@@ -273,13 +340,20 @@ void updateBattery(){
   batterySamples.add(analogRead(BATTERY_V_PIN));
 
   batteryPercent = map(batterySamples.getAverage(), 2060, 2370, 0, 100); // 2060 =~ 3.65v, 2370 =~ 4.2v
-  // TODO: Update for LIPO battery robot
+  // TODO: Update for LIPO battery robot!!!
 
-  // low battery alarm
-  if (batteryPercent < 10 && batteryAlarmTimer < millis()){
-    setBuzzer(300);
-    batteryAlarmTimer = millis() + 600;
-  }
+  // 3577 = 15.0v
+  // 4045 = 16.3
+  // 4095 = 16.7, oops... add voltage drop diode?
+
+  // 14.9v = 20% (critical), 16.8v = 100%
+
+  // low battery alarm, turn on again when updated for Robin
+
+  // if (batteryPercent < 10 && batteryAlarmTimer < millis()){
+  //   setBuzzer(300);
+  //   batteryAlarmTimer = millis() + 600;
+  // }
 }
 
 // -------------------------------
@@ -334,6 +408,17 @@ void OnDataRecv(const uint8_t * mac, const uint8_t *incomingData, int len) {
   // Serial.println(len);
   processJoystick();
   resetReceiveTimeout();
+
+  rP = dataIn.rP;
+  rI = dataIn.rI;
+  rD = dataIn.rD;
+
+  lP = dataIn.lP;
+  lI = dataIn.lI;
+  lD = dataIn.lD;
+
+  rTargetPositionDegrees = dataIn.rTargetPositionDegrees;
+  lTargetPositionDegrees = dataIn.lTargetPositionDegrees;
 }
 
 void sendData(){
@@ -341,7 +426,7 @@ void sendData(){
   if (dataTimer < millis()){
     esp_now_send(remoteAddress, (uint8_t *) &dataOut, sizeof(dataOut));
 
-    dataTimer = millis() + 2;
+    dataTimer = millis() + 5;
   }
   
 };
@@ -369,6 +454,30 @@ void captureLPWM()
   }
 
   Serial.print("*");
+}
+
+// -------------------------------
+// MARK: - Expander
+
+
+void expanderInit(){
+  if (Expander.begin(255)){
+    Serial.println("Expander connected");
+  } else {
+    Serial.println("Expander not found");
+  };
+}
+
+void updateButtons(){
+
+  uint8_t readings = Expander.read8();
+
+  buttonUpL = !digitalRead(BOOT_SW_PIN);
+  buttonUpR = !(readings & (1 << 0));
+  buttonDownR = !(readings & (1 << 1));
+  yellowSwitch = !(readings & (1 << 2));
+  buttonDownL = !(readings & (1 << 3));
+
 }
 
 // -------------------------------
@@ -421,12 +530,20 @@ void setLCD()
 {
   lcd.clear();
 
-  lcd.setCursor(0, 0);
-  lcd.print("Robin is awake!");
+  if (lcdInfo){
+    lcdSetInfo();
+  }
+
+  if (lcdPID){
+    lcdSetPID();
+  }
+
+  if (lcdTargetPosition){
+    lcdSetTargetPosition();
+  }
 
 }
 
-// TODO: Create multiple modes, that can be combined (battery + debug, or battery + menu). Switching mode triggers clear.
 void updateLCD()
 {
 
@@ -434,13 +551,66 @@ void updateLCD()
   {
     return;
   }
-  lcdTimer = millis() + 200; // update every 200 milliseconds
+  lcdTimer = millis() + 50; // update every 200 milliseconds
 
-  // lcd.setCursor(18, 0);
+  if (lcdPID){
+    lcdUpdatePID();
+  }
+
+  if (lcdTargetPosition){
+    lcdUpdateTargetPosition();
+  }
+
+  lcd.setCursor(16, 0);
+  lcd.print(batterySamples.getAverage());
+  lcd.print(" ");
   // char batPerc[3];
   // sprintf(batPerc, "%02d", batteryPercent);
   // lcd.print(batPerc);
 }
+
+void lcdSetInfo(){
+  lcd.setCursor(0, 0);
+  lcd.print("Robin is awake!");
+}
+
+void lcdSetPID(){
+  lcd.setCursor(0, 3);
+  lcd.print("p:     i:     d:");
+}
+
+void lcdUpdatePID(){
+  lcd.setCursor(2,3);
+  lcd.print(rP, 1);
+  lcd.setCursor(9,3);
+  lcd.print(rI, 1);
+  lcd.setCursor(16,3);
+  lcd.print(rD, 1);
+}
+
+void lcdSetTargetPosition(){
+  lcd.setCursor(0,1);
+  lcd.print("tR:     tL:");
+  lcd.setCursor(0,2);
+  lcd.print("pR:     pL:");
+}
+
+void lcdUpdateTargetPosition(){
+  lcd.setCursor(3,1);
+  lcd.print(rTargetPositionDegrees);
+  lcd.print(" ");
+  lcd.setCursor(3,2);
+  lcd.print(rInput, 0);
+  lcd.print(" ");
+
+  lcd.setCursor(11,1);
+  lcd.print(lTargetPositionDegrees);
+  lcd.print(" ");
+  lcd.setCursor(11,2);
+  lcd.print(lInput, 0);
+  lcd.print(" ");
+}
+
 
 // -------------------------------
 // MARK: - Led
@@ -498,6 +668,52 @@ void pidInit(){
   rPID.SetMode(AUTOMATIC);
   rPID.SetOutputLimits(-PWM_RANGE, PWM_RANGE);
   rPID.SetSampleTime(1);
+
+  lPID.SetMode(AUTOMATIC);
+  lPID.SetOutputLimits(-PWM_RANGE, PWM_RANGE);
+  lPID.SetSampleTime(1);
+}
+
+void updatePID(){
+  rInput = positionRLegDegrees;
+  rSetpoint = rTargetPositionDegrees;
+  rPID.SetTunings(rP, rI, rD);
+  rPID.Compute();
+
+  lInput = positionLLegDegrees;
+  lSetpoint = lTargetPositionDegrees;
+  lPID.SetTunings(rP, rI, rD); // still R incoming
+  lPID.Compute();
+}
+
+void controlMotorPID(){
+  // right
+  if (rOutput > 1){
+    ledcWrite(R_B_PWM_CHAN, map(rOutput, 0, PWM_RANGE, RDEADBAND, PWM_RANGE));
+    ledcWrite(R_F_PWM_CHAN, 0);
+  }
+  if (rOutput < -1){
+    ledcWrite(R_F_PWM_CHAN, -map(rOutput, 0, -PWM_RANGE, -RDEADBAND, -PWM_RANGE));
+    ledcWrite(R_B_PWM_CHAN, 0);
+  }
+  if (rOutput > -1 && rOutput < 1){
+    ledcWrite(R_F_PWM_CHAN, 0);
+    ledcWrite(R_B_PWM_CHAN, 0);
+  }
+
+  // left
+  if (lOutput > 1){
+    ledcWrite(L_B_PWM_CHAN, map(lOutput, 0, PWM_RANGE, LDEADBAND, PWM_RANGE));
+    ledcWrite(L_F_PWM_CHAN, 0);
+  }
+  if (lOutput < -1){
+    ledcWrite(L_F_PWM_CHAN, -map(lOutput, 0, -PWM_RANGE, -LDEADBAND, -PWM_RANGE));
+    ledcWrite(L_B_PWM_CHAN, 0);
+  }
+  if (lOutput > -1 && lOutput < 1){
+    ledcWrite(L_F_PWM_CHAN, 0);
+    ledcWrite(L_B_PWM_CHAN, 0);
+  }
 }
 
 // -------------------------------
@@ -514,7 +730,12 @@ void printAll(){
     Serial.print(positionLLegDegrees);
     Serial.print("\t");
     Serial.println(getLAngleThroughMux());
-    // Serial.println(positionRLegRaw);
+
+    Serial.print(buttonUpL);
+    Serial.print(buttonDownL);
+    Serial.print(yellowSwitch);
+    Serial.print(buttonUpR);
+    Serial.println(buttonDownR);
 
   }
 }
@@ -574,36 +795,67 @@ void pwmInit(){
 // --------------------------------
 // MARK: - Remote control
 
-void joystickControlsLegs(){
+void joystickOrButtonsControlLegs(){
+
+  uint8_t speed = 80;
 
   // right
   if (joystickRY > JOYSTICK_TRESHOLD){
-    ledcWrite(R_F_PWM_CHAN, joystickRY);
+    ledcWrite(R_F_PWM_CHAN, joystickRY /2);
+  } else if (buttonUpR){
+    ledcWrite(R_F_PWM_CHAN, speed);
   } else {
     ledcWrite(R_F_PWM_CHAN, 0);
   }
 
   if (joystickRY < -JOYSTICK_TRESHOLD){
-    ledcWrite(R_B_PWM_CHAN, -joystickRY);
-  } else {
+    ledcWrite(R_B_PWM_CHAN, -joystickRY /2);
+  } else if (buttonDownR){
+    ledcWrite(R_B_PWM_CHAN, speed);
+  }  else {
     ledcWrite(R_B_PWM_CHAN, 0);
   }
 
   // left
   if (joystickLY > JOYSTICK_TRESHOLD){
-    ledcWrite(L_F_PWM_CHAN, joystickLY);
+    ledcWrite(L_F_PWM_CHAN, joystickLY /2);
+  } else if (buttonUpL){
+    ledcWrite(L_F_PWM_CHAN, speed);
   } else {
     ledcWrite(L_F_PWM_CHAN, 0);
   }
 
   if (joystickLY < -JOYSTICK_TRESHOLD){
-    ledcWrite(L_B_PWM_CHAN, -joystickLY);
+    ledcWrite(L_B_PWM_CHAN, -joystickLY /2);
+  } else if (buttonDownL){
+    ledcWrite(L_B_PWM_CHAN, speed);
   } else {
     ledcWrite(L_B_PWM_CHAN, 0);
   }
 
 }
 
+void sliderPWMtest(){
+  slideTestForward = map(dataIn.sliderLL, 0, 17620, 0, 255);
+  slideTestBackward = map(dataIn.sliderRL , 0, 17620, 0, 255);
+
+  if (slideTestForward > 5){
+    ledcWrite(R_F_PWM_CHAN, slideTestForward);
+    ledcWrite(L_F_PWM_CHAN, slideTestForward);
+  } else {
+    ledcWrite(R_F_PWM_CHAN, 0);
+    ledcWrite(L_F_PWM_CHAN, 0);
+  }
+
+  if (slideTestBackward > 5){
+    ledcWrite(R_B_PWM_CHAN, slideTestBackward);
+    ledcWrite(L_B_PWM_CHAN, slideTestBackward);
+  } else {
+    ledcWrite(R_B_PWM_CHAN, 0);
+    ledcWrite(L_B_PWM_CHAN, 0);
+  }
+
+}
 
 
 

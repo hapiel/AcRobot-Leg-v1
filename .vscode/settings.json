@@ -20,4 +20,7 @@
     "cmath": "cpp",
     "utility": "cpp"
   }
+  "workbench.colorCustomizations": {
+    "editor.background": "#2a2a30"
+  }
 }
